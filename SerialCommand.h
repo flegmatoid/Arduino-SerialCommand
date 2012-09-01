@@ -1,5 +1,5 @@
 /**
- * SerialCommand - A Wiring/Arduino library to tokenize and parse commands
+ * EtherCommand - A Wiring/Arduino library to tokenize and parse commands
  * received over a serial port.
  * 
  * Copyright (C) 2012 Stefan Rado
@@ -21,55 +21,124 @@
  * You should have received a copy of the GNU General Public License
  * along with this library.  If not, see <http://www.gnu.org/licenses/>.
  */
-#ifndef SerialCommand_h
-#define SerialCommand_h
+#include "EtherCommand.h"
 
-#if defined(WIRING) && WIRING >= 100
-  #include <Wiring.h>
-#elif defined(ARDUINO) && ARDUINO >= 100
-  #include <Arduino.h>
-#else
-  #include <WProgram.h>
-#endif
-#include <string.h>
+/**
+ * Constructor makes sure some things are set.
+ */
+EtherCommand::EtherCommand()
+  : commandList(NULL),
+    commandCount(0),
+    defaultHandler(NULL),
+    term('\n'),           // default terminator for commands, newline character
+    last(NULL)
+{
+  strcpy(delim, " "); // strtok_r needs a null-terminated string
+  clearBuffer();
+}
 
-// Size of the input buffer in bytes (maximum length of one command plus arguments)
-#define SERIALCOMMAND_BUFFER 32
-// Maximum length of a command excluding the terminating null
-#define SERIALCOMMAND_MAXCOMMANDLENGTH 8
+/**
+ * Adds a "command" and a handler function to the list of available commands.
+ * This is used for matching a found token in the buffer, and gives the pointer
+ * to the handler function to deal with it.
+ */
+void EtherCommand::addCommand(const char *command, void (*function)()) {
+  #ifdef EtherCommand_DEBUG
+    Serial.print("Adding command (");
+    Serial.print(commandCount);
+    Serial.print("): ");
+    Serial.println(command);
+  #endif
 
-// Uncomment the next line to run the library in debug mode (verbose messages)
-//#define SERIALCOMMAND_DEBUG
+  commandList = (EtherCommandCallback *) realloc(commandList, (commandCount + 1) * sizeof(EtherCommandCallback));
+  strncpy(commandList[commandCount].command, command, EtherCommand_MAXCOMMANDLENGTH);
+  commandList[commandCount].function = function;
+  commandCount++;
+}
+
+/**
+ * This sets up a handler to be called in the event that the receveived command string
+ * isn't in the list of commands.
+ */
+void EtherCommand::setDefaultHandler(void (*function)(const char *)) {
+  defaultHandler = function;
+}
 
 
-class SerialCommand {
-  public:
-    SerialCommand();      // Constructor
-    void addCommand(const char *command, void(*function)());  // Add a command to the processing dictionary.
-    void setDefaultHandler(void (*function)(const char *));   // A handler to call when no valid command received.
+/**
+ * This checks the Serial stream for characters, and assembles them into a buffer.
+ * When the terminator character (default '\n') is seen, it starts parsing the
+ * buffer for a prefix command, and calls handlers setup by addCommand() member
+ */
+void EtherCommand::readSerial(EthernetClient client) {
+  while (client.available() > 0) {
+    char inChar = client.read();   // Read single available character, there may be more waiting
+    #ifdef EtherCommand_DEBUG
+      Serial.print(inChar);   // Echo back to serial stream
+    #endif
 
-    void readSerial();    // Main entry point.
-    void clearBuffer();   // Clears the input buffer.
-    char *next();         // Returns pointer to next token found in command buffer (for getting arguments to commands).
+    if (inChar == term) {     // Check for the terminator (default '\r') meaning end of command
+      #ifdef EtherCommand_DEBUG
+        Serial.print("Received: ");
+        Serial.println(buffer);
+      #endif
 
-  private:
-    // Command/handler dictionary
-    struct SerialCommandCallback {
-      char command[SERIALCOMMAND_MAXCOMMANDLENGTH + 1];
-      void (*function)();
-    };                                    // Data structure to hold Command/Handler function key-value pairs
-    SerialCommandCallback *commandList;   // Actual definition for command/handler array
-    byte commandCount;
+      char *command = strtok_r(buffer, delim, &last);   // Search for command at start of buffer
+      if (command != NULL) {
+        boolean matched = false;
+        for (int i = 0; i < commandCount; i++) {
+          #ifdef EtherCommand_DEBUG
+            Serial.print("Comparing [");
+            Serial.print(command);
+            Serial.print("] to [");
+            Serial.print(commandList[i].command);
+            Serial.println("]");
+          #endif
 
-    // Pointer to the default handler function
-    void (*defaultHandler)(const char *);
+          // Compare the found command against the list of known commands for a match
+          if (strncmp(command, commandList[i].command, EtherCommand_MAXCOMMANDLENGTH) == 0) {
+            #ifdef EtherCommand_DEBUG
+              Serial.print("Matched Command: ");
+              Serial.println(command);
+            #endif
 
-    char delim[2]; // null-terminated list of character to be used as delimeters for tokenizing (default " ")
-    char term;     // Character that signals end of command (default '\n')
+            // Execute the stored handler function for the command
+            (*commandList[i].function)();
+            matched = true;
+            break;
+          }
+        }
+        if (!matched && (defaultHandler != NULL)) {
+          (*defaultHandler)(command);
+        }
+      }
+      clearBuffer();
+    }
+    else if (isprint(inChar)) {     // Only printable characters into the buffer
+      if (bufPos < EtherCommand_BUFFER) {
+        buffer[bufPos++] = inChar;  // Put character into buffer
+        buffer[bufPos] = '\0';      // Null terminate
+      } else {
+        #ifdef EtherCommand_DEBUG
+          Serial.println("Line buffer is full - increase EtherCommand_BUFFER");
+        #endif
+      }
+    }
+  }
+}
 
-    char buffer[SERIALCOMMAND_BUFFER + 1]; // Buffer of stored characters while waiting for terminator character
-    byte bufPos;                        // Current position in the buffer
-    char *last;                         // State variable used by strtok_r during processing
-};
+/*
+ * Clear the input buffer.
+ */
+void EtherCommand::clearBuffer() {
+  buffer[0] = '\0';
+  bufPos = 0;
+}
 
-#endif //SerialCommand_h
+/**
+ * Retrieve the next token ("word" or "argument") from the command buffer.
+ * Returns NULL if no more tokens exist.
+ */
+char *EtherCommand::next() {
+  return strtok_r(NULL, delim, &last);
+}
